@@ -8,12 +8,10 @@ metadata:
   namespace: jenkins
 spec:
   containers:
-    - name: jnlp
-      args: ["--webSocket", "$(JENKINS_SECRET)", "$(JENKINS_NAME)"]
     - name: kaniko
       image: gcr.io/kaniko-project/executor:v1.23.2-debug
-      command: ["/busybox/cat"]
-      tty: true
+      command: ["/busybox/sh", "-c"]
+      args: ["sleep 99d"]
       volumeMounts:
         - name: docker-config
           mountPath: /kaniko/.docker
