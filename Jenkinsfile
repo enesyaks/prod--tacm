@@ -4,6 +4,8 @@ pipeline {
       yaml '''
 apiVersion: v1
 kind: Pod
+metadata:
+  namespace: jenkins
 spec:
   containers:
     - name: kaniko
@@ -28,10 +30,6 @@ spec:
     IMAGE_BASE = "harbor.itacm.site/itacm/itacm"
   }
 
-  triggers {
-    pollSCM('H/2 * * * *')
-  }
-
   stages {
     stage('Determine Environment & Tag') {
       steps {
@@ -54,7 +52,7 @@ spec:
       }
     }
 
-    stage('Build and Push with Kaniko' ) {
+    stage('Build and Push with Kaniko') {
       steps {
         container('kaniko') {
           sh '''
