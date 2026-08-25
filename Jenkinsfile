@@ -10,8 +10,8 @@ spec:
   containers:
     - name: kaniko
       image: gcr.io/kaniko-project/executor:v1.23.2-debug
-      command: ["/busybox/sh", "-c"]
-      args: ["sleep 99d"]
+      command: ["/busybox/cat"]
+      tty: true
       volumeMounts:
         - name: docker-config
           mountPath: /kaniko/.docker
