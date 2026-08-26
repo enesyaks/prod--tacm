@@ -17,3 +17,4 @@ spec:
                 name: itacm
                 port:
                   number: 80
+                  targetPort: 8000
