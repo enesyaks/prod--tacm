@@ -418,6 +418,12 @@ async function restoreDatabase(sqlGzPath) {
       else reject(new Error(`psql restore exited ${code}: ${stderr.slice(0, 1200)}`));
     });
     input.on('error', reject);
+    // ON_ERROR_STOP=1 makes psql exit on the first bad statement, closing stdin
+    // while gunzip is still writing into it. The resulting EPIPE is an unhandled
+    // 'error' event that takes the whole API process down — which surfaces to the
+    // user as a bare 502 instead of the SQL error. Swallowing it here lets the
+    // close handler above report why the restore actually failed.
+    psql.stdin.on('error', () => {});
     input.pipe(psql.stdin);
   });
   try { await pool.query('SELECT 1'); } catch { /* next request gets a fresh client */ }
