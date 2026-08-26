@@ -26,5 +26,5 @@ spec:
   data:
     - secretKey: robot_password
       remoteRef:
-        key: secret/itacm     # Vault'taki secret yolu (kendi path'ine göre düzelt)
+        key: secret/data/jenkins     # Vault'taki secret yolu (kendi path'ine göre düzelt)
         property: robot_password
