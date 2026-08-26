@@ -1,12 +1,9 @@
-# PostgreSQL — ITACM'in veritabanı.
-# namespace burada YAZILMAZ: Argo CD Application'ının destination.namespace'i belirler.
-# Bu dosya dev / stage / main branch'lerinde birebir aynıdır.
 apiVersion: v1
 kind: Service
 metadata:
   name: itacm-db
+  namespace: itacm
 spec:
-  # Headless servis: StatefulSet pod'una sabit isimle (itacm-db) ulaşmayı sağlar.
   clusterIP: None
   selector:
     app: itacm-db
@@ -17,6 +14,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: itacm-db
+  namespace: itacm
 spec:
   serviceName: itacm-db
   replicas: 1
@@ -43,8 +41,6 @@ spec:
                 secretKeyRef:
                   name: itacm-secrets
                   key: POSTGRES_PASSWORD
-            # Longhorn diski ext4 biçimlendirip kökte lost+found bırakıyor.
-            # PostgreSQL boş olmayan bir dizine kurulmayı reddeder — alt dizin şart.
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
           volumeMounts:
@@ -55,20 +51,13 @@ spec:
               command: ["pg_isready", "-U", "itacm", "-d", "itacm"]
             initialDelaySeconds: 10
             periodSeconds: 5
-          resources:
-            requests:
-              cpu: 100m
-              memory: 256Mi
-            limits:
-              memory: 1Gi
   volumeClaimTemplates:
     - metadata:
         name: data
       spec:
         accessModes: ["ReadWriteOnce"]
-        # Varsayılan longhorn sınıfı 3 replika ayarlı; iki node olduğu için
-        # Degraded kalır. Bu yüzden sınıf her zaman açıkça yazılır.
-        storageClassName: longhorn-critical
+        # Eğer critical adında bir class tanımlamadıysan burayı longhorn-bulk veya longhorn yapabilirsin
+        storageClassName: longhorn-bulk 
         resources:
           requests:
-            storage: 3Gi
+            storage: 5Gi
