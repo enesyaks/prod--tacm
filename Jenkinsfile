@@ -7,6 +7,10 @@ kind: Pod
 metadata:
   namespace: jenkins
 spec:
+  hostAliases:
+    - ip: "10.10.10.2"
+      hostnames:
+        - "harbor.itacm.site"
   containers:
     - name: kaniko
       image: gcr.io/kaniko-project/executor:v1.23.2-debug
