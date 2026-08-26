@@ -1,0 +1,19 @@
+# Traefik yönlendirmesi. TLS yok — Cloudflare tüneli kenarda sonlandırıyor.
+# Branch'ler arasındaki TEK fark: host.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: itacm
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: app.itacm.site
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: itacm
+                port:
+                  number: 80
