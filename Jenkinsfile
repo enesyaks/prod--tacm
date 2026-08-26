@@ -65,6 +65,7 @@ spec:
     stage('Build and Push with Kaniko') {
       steps {
         container('kaniko') {
+          // Burada tek tırnak kullanıyoruz, değişkenleri Linux shell'i okuyacak
           sh '''
             echo "Building and pushing to ${IMAGE_BASE}:${IMAGE_TAG}"
             /kaniko/executor \
@@ -78,7 +79,7 @@ spec:
       }
     }
 
-    sstage('Update manifest') {
+    stage('Update manifest') {
       steps {
         container('git') {
           withCredentials([usernamePassword(
@@ -86,23 +87,23 @@ spec:
             usernameVariable: 'GIT_USER', 
             passwordVariable: 'GIT_TOKEN')]) {
             
-            // Çift tırnak (""") yerine tek tırnak (''') kullanıyoruz!
+            // DİKKAT: Güvenlik açığı uyarısını çözmek için burası artık tek tırnak (''')
             sh '''
-              # 1. Git sahiplik/güvenlik kısıtlamasını aşmak için (En Kritik Satır):
+              # 1. Klasör sahipliği hatasını (fatal: not in a git directory) çözüyoruz
               git config --global --add safe.directory '*'
               
-              echo "Updating k8s/02-itacm.yaml with new tag: $IMAGE_TAG"
+              echo "Updating k8s/02-itacm.yaml with new tag: ${IMAGE_TAG}"
               
-              # 2. Dosyayı yeni etiketle güncelliyoruz
-              sed -i "s|itacm/itacm:.*|itacm/itacm:$IMAGE_TAG|" k8s/02-itacm.yaml
+              # 2. Eski etiketi silip yeni etiketi (IMAGE_TAG) yazıyoruz
+              sed -i "s|itacm/itacm:.*|itacm/itacm:${IMAGE_TAG}|" k8s/02-itacm.yaml
               
-              # 3. Git kimlik ayarları
+              # 3. Git kimlik ayarları (Commit'te Jenkins olarak görünecek)
               git config user.email "jenkins@itacm.site"
               git config user.name "jenkins"
               
-              # 4. Değişikliği commit'le ve pushla
-              git commit -am "deploy: $IMAGE_TAG"
-              git push https://$GIT_USER:$GIT_TOKEN@github.com/enesyaks/prod--tacm.git HEAD:$BRANCH_NAME
+              # 4. Değişikliği commit'le ve dinamik olarak çalışılan branch'e pushla
+              git commit -am "deploy: ${IMAGE_TAG}"
+              git push https://${GIT_USER}:${GIT_TOKEN}@github.com/enesyaks/prod--tacm.git HEAD:${BRANCH_NAME}
             '''
           }
         }
