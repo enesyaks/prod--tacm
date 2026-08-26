@@ -1,0 +1,92 @@
+# prod veritabanını her gece dev'e kopyalar ve kişisel verileri maskeler.
+#
+# Neden prod namespace'inde duruyor: iş, dev'in veritabanı parolasına ihtiyaç
+# duyuyor. Bu job'ı dev'e koysaydık dev'in PROD parolasını tutması gerekirdi —
+# yani en az korunan ortam en değerli sırrı taşırdı. Ters yön daha güvenli.
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: itacm-dev-db
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: vault
+    kind: ClusterSecretStore
+  target:
+    name: itacm-dev-db
+    creationPolicy: Owner
+  data:
+    - secretKey: POSTGRES_PASSWORD
+      remoteRef:
+        key: itacm/dev
+        property: POSTGRES_PASSWORD
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: db-sync-to-dev
+spec:
+  schedule: "0 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: sync
+              image: postgres:16-alpine
+              env:
+                - name: PROD_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: itacm-secrets
+                      key: POSTGRES_PASSWORD
+                - name: DEV_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: itacm-dev-db
+                      key: POSTGRES_PASSWORD
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  PROD="postgres://itacm:${PROD_PASSWORD}@itacm-db.prod.svc.cluster.local:5432/itacm"
+                  DEV="postgres://itacm:${DEV_PASSWORD}@itacm-db.dev.svc.cluster.local:5432/itacm"
+
+                  echo "[sync] prod dokumu aliniyor"
+                  pg_dump --clean --if-exists --no-owner --no-privileges "$PROD" > /tmp/prod.sql
+
+                  echo "[sync] dev'e yaziliyor"
+                  psql -v ON_ERROR_STOP=1 "$DEV" -f /tmp/prod.sql
+
+                  echo "[sync] kisisel veriler maskeleniyor"
+                  psql -v ON_ERROR_STOP=1 "$DEV" <<'SQL'
+                  UPDATE employees SET
+                    full_name = 'Personel ' || substr(id::text, 1, 8),
+                    email     = 'employee-' || substr(id::text, 1, 8) || '@example.invalid';
+
+                  DELETE FROM users WHERE role <> 'Admin';
+
+                  UPDATE users SET
+                    username = 'admin-' || substr(id::text, 1, 8),
+                    email    = 'admin-' || substr(id::text, 1, 8) || '@example.invalid';
+                  SQL
+
+                  echo "[sync] tamam"
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  memory: 512Mi
+          volumes:
+            - name: tmp
+              emptyDir:
+                sizeLimit: 2Gi

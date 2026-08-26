@@ -1,0 +1,73 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Bu overlay'in ürettiği her nesne bu namespace'e yazılır.
+namespace: dev
+
+resources:
+  - ../../base
+
+# Ortama özgü, gizli olmayan ayarlar. Kustomize bu ConfigMap'in adına
+# içeriğinin hash'ini ekler; değer değişince ad değişir, Deployment'ın
+# referansı da otomatik güncellenir ve pod yeniden başlar.
+configMapGenerator:
+  - name: itacm-env
+    literals:
+      - DATA_BACKEND=postgres
+      - DATA_DIR=/app/data
+      - PORT=8000
+      - TRUST_PROXY=1
+      - APP_URL=https://dev.itacm.site
+      - ADMIN_EMAIL=admin@itacm.site
+
+# Terfi tek satır: bir üst ortamda doğrulanan etiketi buraya yazıyorsun.
+images:
+  - name: harbor.itacm.site/itacm/itacm
+    newTag: PLACEHOLDER
+
+patches:
+  # Vault yolu: secret/itacm/dev
+  - target:
+      kind: ExternalSecret
+      name: itacm-secrets
+    patch: |-
+      - op: replace
+        path: /spec/dataFrom/0/extract/key
+        value: itacm/dev
+
+  # Bu ortamın adresi
+  - target:
+      kind: Ingress
+      name: itacm
+    patch: |-
+      - op: replace
+        path: /spec/rules/0/host
+        value: dev.itacm.site
+
+  # Disk boyutları — ortamın taşıyacağı veriye göre
+  - target:
+      kind: StatefulSet
+      name: itacm-db
+    patch: |-
+      - op: replace
+        path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+        value: 5Gi
+  - target:
+      kind: PersistentVolumeClaim
+      name: itacm-data
+    patch: |-
+      - op: replace
+        path: /spec/resources/requests/storage
+        value: 5Gi
+
+  # Kaynak ayırma
+  - target:
+      kind: Deployment
+      name: itacm
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 200m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: 1Gi

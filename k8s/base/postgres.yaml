@@ -1,17 +1,16 @@
-# PostgreSQL — ITACM'in veritabanı.
-# namespace burada YAZILMAZ: Argo CD Application'ının destination.namespace'i belirler.
-# Bu dosya dev / stage / main branch'lerinde birebir aynıdır.
+# Her ortamın kendi PostgreSQL'i. Ortamlar arası veri sızıntısı olmasın diye
+# tek bir sunucuyu paylaşmıyoruz.
 apiVersion: v1
 kind: Service
 metadata:
   name: itacm-db
 spec:
-  # Headless servis: StatefulSet pod'una sabit isimle (itacm-db) ulaşmayı sağlar.
   clusterIP: None
   selector:
     app: itacm-db
   ports:
-    - port: 5432
+    - name: postgres
+      port: 5432
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -32,7 +31,8 @@ spec:
         - name: postgres
           image: postgres:16-alpine
           ports:
-            - containerPort: 5432
+            - name: postgres
+              containerPort: 5432
           env:
             - name: POSTGRES_DB
               value: itacm
@@ -43,8 +43,6 @@ spec:
                 secretKeyRef:
                   name: itacm-secrets
                   key: POSTGRES_PASSWORD
-            # Longhorn diski ext4 biçimlendirip kökte lost+found bırakıyor.
-            # PostgreSQL boş olmayan bir dizine kurulmayı reddeder — alt dizin şart.
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
           volumeMounts:
@@ -55,6 +53,11 @@ spec:
               command: ["pg_isready", "-U", "itacm", "-d", "itacm"]
             initialDelaySeconds: 10
             periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 60
+            periodSeconds: 20
           resources:
             requests:
               cpu: 100m
@@ -66,9 +69,7 @@ spec:
         name: data
       spec:
         accessModes: ["ReadWriteOnce"]
-        # Varsayılan longhorn sınıfı 3 replika ayarlı; iki node olduğu için
-        # Degraded kalır. Bu yüzden sınıf her zaman açıkça yazılır.
         storageClassName: longhorn-critical
         resources:
           requests:
-            storage: 3Gi
+            storage: 5Gi

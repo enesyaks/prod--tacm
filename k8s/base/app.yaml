@@ -1,0 +1,98 @@
+# ITACM uygulaması: yüklenen belgeler için disk, uygulamanın kendisi, ve
+# Traefik'in bağlanacağı servis.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: itacm-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: longhorn-critical
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: itacm
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: itacm
+  template:
+    metadata:
+      labels:
+        app: itacm
+    spec:
+      imagePullSecrets:
+        - name: harbor-pull
+      containers:
+        - name: itacm
+          image: harbor.itacm.site/itacm/itacm:PLACEHOLDER
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: itacm-env
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: itacm-secrets
+                  key: POSTGRES_PASSWORD
+            - name: DATABASE_URL
+              value: postgres://itacm:$(POSTGRES_PASSWORD)@itacm-db:5432/itacm
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: itacm-secrets
+                  key: JWT_SECRET
+            - name: SETUP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: itacm-secrets
+                  key: SETUP_TOKEN
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: itacm-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: itacm
+spec:
+  selector:
+    app: itacm
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
