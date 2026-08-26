@@ -78,28 +78,32 @@ spec:
       }
     }
 
-    stage('Update manifest') {
+    sstage('Update manifest') {
       steps {
         container('git') {
-          // Jenkins'teki credential ID'si 'github' olmalı (Username with password)
           withCredentials([usernamePassword(
             credentialsId: 'github', 
             usernameVariable: 'GIT_USER', 
             passwordVariable: 'GIT_TOKEN')]) {
-            sh """
-              echo "Updating k8s/02-itacm.yaml with new tag: ${IMAGE_TAG}"
+            
+            // Çift tırnak (""") yerine tek tırnak (''') kullanıyoruz!
+            sh '''
+              # 1. Git sahiplik/güvenlik kısıtlamasını aşmak için (En Kritik Satır):
+              git config --global --add safe.directory '*'
               
-              # 1. Eski etiketi silip yeni etiketi (IMAGE_TAG) yazıyoruz
-              sed -i "s|itacm/itacm:.*|itacm/itacm:${IMAGE_TAG}|" k8s/02-itacm.yaml
+              echo "Updating k8s/02-itacm.yaml with new tag: $IMAGE_TAG"
               
-              # 2. Git kimlik ayarları (Commit'te Jenkins olarak görünecek)
+              # 2. Dosyayı yeni etiketle güncelliyoruz
+              sed -i "s|itacm/itacm:.*|itacm/itacm:$IMAGE_TAG|" k8s/02-itacm.yaml
+              
+              # 3. Git kimlik ayarları
               git config user.email "jenkins@itacm.site"
               git config user.name "jenkins"
               
-              # 3. Değişikliği commit'le ve dinamik olarak çalışılan branch'e pushla
-              git commit -am "deploy: ${IMAGE_TAG}"
-              git push https://${GIT_USER}:${GIT_TOKEN}@github.com/enesyaks/prod--tacm.git HEAD:${BRANCH_NAME}
-            """
+              # 4. Değişikliği commit'le ve pushla
+              git commit -am "deploy: $IMAGE_TAG"
+              git push https://$GIT_USER:$GIT_TOKEN@github.com/enesyaks/prod--tacm.git HEAD:$BRANCH_NAME
+            '''
           }
         }
       }
