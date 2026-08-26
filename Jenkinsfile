@@ -7,6 +7,7 @@ kind: Pod
 metadata:
   namespace: jenkins
 spec:
+  # Kaniko'nun Harbor'ı bulabilmesi için DNS kaydı
   hostAliases:
     - ip: "10.10.10.2"
       hostnames:
@@ -19,6 +20,11 @@ spec:
       volumeMounts:
         - name: docker-config
           mountPath: /kaniko/.docker
+    # Manifest güncellemesi için Git aracı
+    - name: git
+      image: alpine/git:v2.40.1
+      command: ["/bin/sh", "-c", "cat"]
+      tty: true
   volumes:
     - name: docker-config
       secret:
@@ -68,6 +74,33 @@ spec:
               --build-arg ENV="${DEPLOY_ENV}" \
               --build-arg FRONTEND_DIGEST="$GIT_COMMIT"
           '''
+        }
+      }
+    }
+
+    stage('Update manifest') {
+      steps {
+        container('git') {
+          // Jenkins'teki credential ID'si 'github' olmalı (Username with password)
+          withCredentials([usernamePassword(
+            credentialsId: 'github', 
+            usernameVariable: 'GIT_USER', 
+            passwordVariable: 'GIT_TOKEN')]) {
+            sh """
+              echo "Updating k8s/02-itacm.yaml with new tag: ${IMAGE_TAG}"
+              
+              # 1. Eski etiketi silip yeni etiketi (IMAGE_TAG) yazıyoruz
+              sed -i "s|itacm/itacm:.*|itacm/itacm:${IMAGE_TAG}|" k8s/02-itacm.yaml
+              
+              # 2. Git kimlik ayarları (Commit'te Jenkins olarak görünecek)
+              git config user.email "jenkins@itacm.site"
+              git config user.name "jenkins"
+              
+              # 3. Değişikliği commit'le ve dinamik olarak çalışılan branch'e pushla
+              git commit -am "deploy: ${IMAGE_TAG}"
+              git push https://${GIT_USER}:${GIT_TOKEN}@github.com/enesyaks/prod--tacm.git HEAD:${BRANCH_NAME}
+            """
+          }
         }
       }
     }
