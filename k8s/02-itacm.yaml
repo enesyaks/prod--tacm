@@ -34,7 +34,7 @@ spec:
         - name: harbor-pull
       containers:
         - name: itacm
-          image: harbor.itacm.site/itacm/itacm:dev-51034773af054819d8848bb6cc87c9f264b6aa80
+          image: harbor.itacm.site/itacm/itacm:dev-d898325dd0c48e409e264f689e8a679ea19f5fd1
           ports:
             - containerPort: 8000
           env:
