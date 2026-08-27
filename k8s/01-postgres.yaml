@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: itacm-db
+  namespace: itacm
+spec:
+  clusterIP: None
+  selector:
+    app: itacm-db
+  ports:
+    - port: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: itacm-db
+  namespace: itacm
+spec:
+  serviceName: itacm-db
+  replicas: 1
+  selector:
+    matchLabels:
+      app: itacm-db
+  template:
+    metadata:
+      labels:
+        app: itacm-db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: itacm
+            - name: POSTGRES_USER
+              value: itacm
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: itacm-secrets
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "itacm", "-d", "itacm"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # Eğer critical adında bir class tanımlamadıysan burayı longhorn-bulk veya longhorn yapabilirsin
+        storageClassName: longhorn-bulk 
+        resources:
+          requests:
+            storage: 5Gi
