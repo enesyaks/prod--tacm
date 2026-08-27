@@ -51,7 +51,11 @@ pipeline {
     stage('Build') {
       // Jenkins'in kendi attigi deploy commit'leri yeni bir build
       // tetiklemesin. Dongu buradan kiriliyor.
-      when { not { changelog '.*\\[skip ci\\].*' } }
+      // beforeAgent: kosul saglanmiyorsa agent pod'u hic acilmasin.
+      when {
+        beforeAgent true
+        not { changelog '.*\\[skip ci\\].*' }
+      }
       agent { kubernetes { yaml podYaml } }
       steps {
         container('kaniko') {
@@ -76,6 +80,7 @@ pipeline {
       // stage ve dev dallari kendi ortamlarinin etiketini gunceller.
       // main bunu YAPMAZ: prod'a cikis ayri bir onaydan gecer.
       when {
+        beforeAgent true
         allOf {
           anyOf { branch 'stage'; branch 'dev' }
           not { changelog '.*\\[skip ci\\].*' }
@@ -121,7 +126,14 @@ pipeline {
 
     // ---------------------------------------------------------------
     stage('Onay: dev') {
-      when { branch 'stage' }
+      // beforeInput: Jenkins varsayilan olarak input'u when'den ONCE
+      // degerlendirir, yani kosul saglanmayan bir dalda bile onay sorar.
+      // Bu satir sirayi tersine cevirir.
+      when {
+        beforeAgent true
+        beforeInput true
+        branch 'stage'
+      }
       // input bir DIREKTIF, adim degil: onay gelene kadar pod acilmaz.
       input {
         message 'stage dogrulandi mi? Kod dev ortamina tasinsin mi?'
@@ -155,7 +167,14 @@ pipeline {
 
     // ---------------------------------------------------------------
     stage('Onay: main') {
-      when { branch 'dev' }
+      // beforeInput: Jenkins varsayilan olarak input'u when'den ONCE
+      // degerlendirir, yani kosul saglanmayan bir dalda bile onay sorar.
+      // Bu satir sirayi tersine cevirir.
+      when {
+        beforeAgent true
+        beforeInput true
+        branch 'dev'
+      }
       input {
         message 'dev dogrulandi mi? Kod main dalina tasinsin mi?'
         ok 'Tasi'
