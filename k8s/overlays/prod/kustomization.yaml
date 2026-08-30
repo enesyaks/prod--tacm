@@ -24,7 +24,7 @@ configMapGenerator:
 # Terfi tek satır: bir üst ortamda doğrulanan etiketi buraya yazıyorsun.
 images:
   - name: harbor.itacm.site/itacm/itacm
-    newTag: aa6904ef2c94a4346848f70a88137a978cc1c139
+    newTag: b11b7c175ed1ba8fab13657586d8db2ccb458f12
 
 patches:
   # Vault yolu: secret/itacm/prod
