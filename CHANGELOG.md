@@ -4,6 +4,210 @@ All notable changes to **ITACM — IT Asset Control Pro** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.9.0] — 2026-09-01
+
+Two features aimed at the gaps most often raised against GLPI, and the
+permission gates that attacking them turned out to need.
+
+### Added
+- **Service-desk automation rules.** "When a ticket is opened, if <conditions>
+  then <actions>", configured from Service Desk → Automation rules. Conditions
+  read the subject, description, category, type, source (staff / portal /
+  email), requester name, email, department and request template; actions set
+  the category, impact, urgency, priority, assignee or an internal note. Rules
+  run in order at creation time only and write through plain SQL rather than
+  `updateTicket`, so a rule can never trigger another evaluation pass. A later
+  rule overrides an earlier one per field and `stopOnMatch` lets a specific rule
+  shield a catch-all. Changing the priority re-targets the SLA clocks from
+  creation. Text comparison folds Turkish and accented characters, so a rule
+  written "yazıcı" also matches a subject typed "YAZICI". The editor carries a
+  dry-run tester that evaluates unsaved drafts, and every rule keeps a match
+  counter so one that never fires is visible without reading the audit log.
+- **Active Directory / LDAP.** Sign-in and directory sync, each switchable on
+  its own and both off by default, under Integrations → Directory. Sign-in is
+  invite-only like SSO: the directory verifies the password of an account that
+  already exists here and never creates one at the login screen. Sync creates
+  and updates employees, resolves `manager` into the manager link the approval
+  chain routes on, optionally provisions IT accounts from a group→role mapping,
+  and optionally deactivates leavers. People are keyed on the directory's
+  immutable object id (`objectGUID` on AD, `entryUUID` on OpenLDAP) rather than
+  the DN, so a rename or an OU move updates the row instead of duplicating the
+  person. Group membership is read from `memberOf` where the directory supplies
+  it and from the group objects otherwise — what OpenLDAP without the memberof
+  overlay needs. Run it manually, preview it first (a dry run that writes
+  nothing), or schedule it hourly / daily. Attribute names are configurable;
+  the defaults are Active Directory's.
+
+### Security
+Found while attacking the new endpoints with a least-privilege account holding
+only `integration:manage`:
+
+- **Directory sync could provision Admin accounts without the user-management
+  right.** A holder of `integration:manage` — the group you would hand someone
+  to look after SMTP and webhooks, and which is refused by
+  `POST /api/auth/users` — could point the integration at a directory of their
+  own, map one of its groups to `Admin`, and sign in as the account the sync
+  created. `createUsers` now requires `user_management:create|manage`, checked
+  on the value being saved rather than the transition, so an enabled switch
+  cannot be kept while the directory underneath it is re-pointed.
+- **Directory sign-in could be enabled without the user-management right.**
+  Whoever turns it on while choosing the server can stand up a directory that
+  answers yes to any bind for an existing address. `loginEnabled` now requires
+  the same right.
+- **Employee sync wrote employee rows without an employee right.**
+  `syncEmployees` and `deactivateMissing` now require `employee:update|manage`,
+  enforced both when saving the configuration and when triggering a run.
+- **Credentials embedded in the directory URL** (`ldap://user:pass@host`) were
+  stored and echoed back in cleartext; they are now rejected, since the bind
+  password has an encrypted field precisely so it never sits there.
+- **A rule that assigns tickets** now requires `ticket:assign`, the action
+  `updateTicket` already re-checks on every manual assignee change.
+- **Reading the rule set** moved from `ticket:read` to `ticket:configure` — it
+  carries internal triage notes and shows who work is routed to.
+
+Deactivation carries its own guard: if more than 30% of synced employees are
+missing from one run it is skipped and reported, because that is a filter
+mistake rather than a third of the company resigning.
+
+### Fixed
+- **The SLA claim in both READMEs did not match the code.** The timers run on a
+  24/7 clock and pause while a ticket is *pending*; there is no business-hours
+  calendar. The documentation now says so.
+
+### Changed
+- CI runs the unit suite with `--test-concurrency=1`. Running one child process
+  per test file in parallel intermittently produced "Unable to deserialize
+  cloned data" on Node 24 with no code change involved — the same commit passed
+  on a re-run. The suite takes about a second, so serialising it costs nothing.
+
+## [1.8.3] — 2026-08-31
+
+### Fixed
+- **A decimal asset cost was rejected with a 500 error.** Registering hardware with
+  a non-integer purchase cost (e.g. `42999.50`) crashed the insert with
+  `invalid input syntax for type integer`. The cause was `COALESCE($30, 0)` in the
+  asset INSERT: the untyped integer literal `0` made PostgreSQL infer the bound
+  cost parameter as an integer, so any value with decimals failed. The parameter
+  is now cast to `numeric`, so fractional costs (money always has them) are stored
+  correctly. Found during a full end-to-end pass over every module.
+
+## [1.8.2] — 2026-08-31
+
+Full-codebase security review (whole app, not just the Service Desk). One
+confidentiality gap fixed; the rest of the review came back clean.
+
+### Security
+- **Asset costs were not gated by `view_confidential`.** The financial-access
+  control (already applied to contracts, licences, mobile lines and maintenance)
+  was never wired into the asset routes, so any read-capable user without the
+  confidential-cost permission — including the read-only **Viewer** role — could
+  read every asset's purchase `cost`, `salvageValue` and derived `bookValue` on
+  the list and detail endpoints, and could set a cost on create/update. The asset
+  routes now redact those fields on read and reject a cost write from a caller
+  without the permission, matching the other resources. `bookValue` and
+  `salvageValue` were added to the redaction set so a derived figure can't leak
+  the cost back out.
+
+### Reviewed and clean (no change needed)
+- Query layer is uniformly parameterized; the AI advanced-query feature is
+  contained by a dedicated read-only DB role (`itacm_ai_ro`, `ai.*` views only,
+  read-only transaction) on top of its keyword/validator denylist.
+- JWT algorithm is pinned (`HS256`); webhook delivery uses a pinned
+  resolve-then-connect SSRF guard; the update check targets a fixed host.
+- Role confinement (Portal → `/api/me/*`, HR lane, Viewer read-only) verified
+  against a live instance; uploads go through the magic-byte guard; the migration
+  restore rejects path-traversal and symlink escapes; record updates are
+  whitelist-based (no mass assignment).
+
+## [1.8.1] — 2026-08-30
+
+Hardening + correctness release for the Service Desk module (security review and a
+full test pass over the approval workflow).
+
+### Security
+- **Email-to-ticket sender spoofing fixed.** The DMARC check trusted any
+  `Authentication-Results` header, including one a sender embedded in the message —
+  so a forged `dmarc=pass` alongside the provider's real `dmarc=fail` let anyone
+  open a ticket "as the CEO" and inject staff-only notes into arbitrary ticket
+  numbers. The verdict is now believed only from an Owner-pinned **trusted
+  authserv-id**, a real `dmarc=fail` vetoes, and the pass is bound to the exact
+  From domain. Ships **fail-closed**: with no authserv-id configured, no inbound
+  mail is attributed to a real requester. Configure it in **Integrations → Email
+  (IMAP)**.
+- **Stored IMAP password no longer exfiltratable.** `Test connection` merged the
+  request body over the saved config and re-injected the decrypted password, so a
+  user with `integration:manage` could make the server log in to a host of their
+  choosing with a credential they cannot read. The test now refuses to reuse the
+  stored password for a different host/account, and the **SSRF host guard** that
+  SMTP already used is applied to IMAP save / test / poll (blocks localhost,
+  private/reserved IPs and internal names). The connection error returned to the
+  client is generic, so the endpoint is no longer a network oracle.
+- A failed IMAP connection no longer crashes the process (the async `error` event
+  is handled).
+
+### Fixed
+- **Approval chain could skip a mandatory approver.** When a step in the middle of
+  a chain could not be resolved (e.g. `department` with no department manager on
+  file), the request finalized as *approved* and silently skipped every later
+  step — including a fixed finance approver. Unresolvable steps are now **skipped
+  over**, not treated as the end of the chain; the same fix applies when the first
+  step is the unresolvable one.
+- **Service-request approvals could be under-routed by the requester.** A template's
+  fixed (e.g. finance) approver was dropped whenever the requester's self-declared
+  `amount` was missing or zero. A missing/zero amount now **fails closed** — the
+  fixed approver stays; it is dropped only for a real amount provably below the
+  threshold.
+- **Self-approval guard tightened.** No org shape can now resolve an approver to
+  the requester themselves, including a `manager2` skip-level that loops back
+  through a reporting cycle.
+- Portal requesters can now **withdraw their own pending request**
+  (`POST /api/me/approvals/:id/cancel`); previously the withdraw path was reachable
+  only by staff.
+
+## [1.8.0] — 2026-08-30
+
+### Added
+- **Service Desk — an ITIL-aligned ITSM module** next to the inventory. Ships
+  **off by default**; enable it from Settings (nothing appears in the nav until
+  you do).
+  - **Incidents & service requests** with **Impact × Urgency** priority, SLA
+    response/resolution timers (pause while pending, breach markers,
+    auto-escalation), a Jira-style **workflow editor** (custom status
+    transitions + *auto-close resolved*), canned replies, saved list views, a
+    Kanban board, bulk actions, CSV export and **CSAT** on closure.
+  - **Request templates + multi-step approval chains** (manager → manager's
+    manager → department, sequential or parallel *any*/*all*), with delegation,
+    reminders and escalation. Approvals reuse the existing generic approval
+    engine and resolve approvers from the org chart.
+  - **Employee self-service Portal** — the same login employees use for their
+    assets — to open requests, follow their tickets, reply, attach files and
+    approve what is routed to them.
+  - **Three-level visibility** on comments & attachments (*public*,
+    *approver-only*, *IT-only*), enforced in the SQL `WHERE` clause of every
+    read path.
+  - **Problem management** (root cause / workaround, linked incidents) and
+    **Change enablement** (type, risk, CAB approval, schedule, rollback plan).
+  - **Knowledge Base** with staff authoring, inline PDF/image attachments and a
+    published-only Help Center in the portal (deflection).
+  - **Email-to-ticket over IMAP** — polls a mailbox, opens tickets and
+    cross-links `[REQ-1234]` replies. Sender identity is attributed only on a
+    provider-verified **DMARC pass**, so a forged `From` cannot open a ticket as
+    someone else.
+  - **"Similar past tickets"** panel showing how comparable tickets were
+    resolved.
+- **Per-employee manager** (`reports to`) in the employee form, and an HTML **org
+  tree** rebuilt around it — fold/unfold, avatars, and set-manager straight from
+  the chart. Approval chains resolve through it.
+
+### Changed
+- Express upgraded from 4.x to **5.2**; base image moved to `node:26-alpine`.
+- `README.md` documents the Service Desk; `README.tr.md` caught up with the
+  Service Desk module and the SSO support added in 1.7.0.
+
+### Security
+- Staff-only ticket documents are no longer downloadable by approvers.
+- Inbound email sender identity is DMARC-gated (see above).
+
 ## [1.7.0] — 2026-08-18
 
 ### Added
