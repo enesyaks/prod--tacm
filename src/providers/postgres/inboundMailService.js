@@ -170,7 +170,7 @@ async function createFromEmail(parsed, cfg) {
   const created = await ticketService.createTicket(
     { type: conf.defaultType, subject, description, category: conf.defaultCategory || undefined },
     sysUser,
-    { asEmployee }
+    { asEmployee, source: 'email', senderEmail: fromAddr }
   );
   if (related) {
     // Note on the referenced ticket pointing at the new one (staff-only), so IT
