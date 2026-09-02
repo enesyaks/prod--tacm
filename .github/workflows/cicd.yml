@@ -36,6 +36,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Node 26 ikilisi libatomic.so.1'e bagli ve ARC runner image'inda o
+      # kutuphane yok: setup-node surumu indirir, acar, sonra calistiramaz.
+      # Kalici cozum kutuphaneyi iceren ozel bir runner image'i olurdu.
+      - name: Eksik sistem kütüphanesi
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libatomic1
+
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
@@ -68,6 +74,12 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v7
+
+      # Node 26 ikilisi libatomic.so.1'e bagli ve ARC runner image'inda o
+      # kutuphane yok: setup-node surumu indirir, acar, sonra calistiramaz.
+      # Kalici cozum kutuphaneyi iceren ozel bir runner image'i olurdu.
+      - name: Eksik sistem kütüphanesi
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libatomic1
 
       - uses: actions/setup-node@v7
         with:
