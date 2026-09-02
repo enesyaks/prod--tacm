@@ -1,0 +1,22 @@
+# Traefik yonlendirmesi. TLS yok: sifrelemeyi Cloudflare tuneli kenarda
+# sonlandiriyor, yerel agda sifresiz gitmesi sorun degil.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: itacm
+spec:
+  # Acik yazmak, ileride ikinci bir denetleyici eklendiginde kuralin sessizce
+  # baska yere kaymasini onler.
+  ingressClassName: traefik
+  rules:
+    # Adresi her overlay kendi host'u ile degistirir.
+    - host: PLACEHOLDER
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: itacm
+                port:
+                  name: http

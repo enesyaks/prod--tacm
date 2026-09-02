@@ -1,0 +1,93 @@
+# Veritabani. Her ortamin kendi PostgreSQL'i var; tek sunucuyu paylassalardi
+# stage'de yapilan bir hata prod verisine dokunabilirdi.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: itacm-db
+spec:
+  # Headless servis: DNS dogrudan pod'un IP'sini dondurur, araya yuk
+  # dengeleyici girmez. Tek veritabani varken dagitacak bir sey yok.
+  clusterIP: None
+  selector:
+    app: itacm-db
+  ports:
+    - name: postgres
+      port: 5432
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: itacm-db
+spec:
+  # Yukaridaki headless servisi isaret eder; StatefulSet pod'a sabit bir DNS
+  # adi vermek icin buna ihtiyac duyar.
+  serviceName: itacm-db
+  # PostgreSQL'i cogaltmak replikasyon kurmayi gerektirir. Burada 2 yazmak
+  # birbirinden habersiz iki veritabani uretir.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: itacm-db
+  template:
+    metadata:
+      labels:
+        app: itacm-db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            # Bu ikisi SADECE disk bosken islenir. Dolu bir diskle acilirsa
+            # sessizce yok sayilir.
+            - name: POSTGRES_DB
+              value: itacm
+            - name: POSTGRES_USER
+              value: itacm
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: itacm-secrets
+                  key: POSTGRES_PASSWORD
+            # Longhorn diski ext4 bicimlendirip kokte lost+found birakiyor.
+            # PostgreSQL bos olmayan bir dizine kurulmayi REDDEDER; alt dizin sart.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "itacm", "-d", "itacm"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            # Kasitli olarak pg_isready DEGIL: uzun bir sorgu sirasinda
+            # yavaslarsa veritabanini yeniden baslatmis oluruz.
+            tcpSocket:
+              port: postgres
+            initialDelaySeconds: 60
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              # CPU'ya sinir koymuyoruz: asildiginda oldurme degil KISMA olur
+              # ve veritabaninda fark edilmesi zor yavaslamalar uretir.
+              memory: 1Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # Acikca yazmak sart: varsayilan longhorn sinifi 3 replika istiyor ama
+        # cluster'da iki node var, o sinifa dusen disk kalici Degraded kalir.
+        storageClassName: longhorn-critical
+        resources:
+          requests:
+            storage: 5Gi

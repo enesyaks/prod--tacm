@@ -1,0 +1,21 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: itacm-prod
+  # Application kayitlari HER ZAMAN argocd namespace'inde durur.
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/enesyaks/prod--tacm.git
+    # Kod dallarini degil deploy dalini izliyor: etiketler orada.
+    targetRevision: deploy
+    path: k8s/overlays/prod
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: prod
+  syncPolicy:
+    # automated blogu KASITLI olarak yok: main'e atilan commit prod'a
+    # kendiliginden inmez, Argo CD arayuzunden Sync denmesi gerekir.
+    syncOptions:
+      - CreateNamespace=true

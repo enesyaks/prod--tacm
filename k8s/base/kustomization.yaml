@@ -1,0 +1,18 @@
+# Bu dosya Kubernetes'e GITMEZ; kustomize'in kendi tarif dosyasidir.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Burada yazmayan dosya derlemeye girmez.
+resources:
+  - externalsecrets.yaml
+  - postgres.yaml
+  - app.yaml
+  - ingress.yaml
+
+labels:
+  # includeSelectors: false KRITIK. true olsaydi bu etiket Deployment'in
+  # selector alanina da eklenirdi; selector'lar olusturulduktan sonra
+  # DEGISTIRILEMEZ ve nesneyi silmeden duzeltemezsin.
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: itacm

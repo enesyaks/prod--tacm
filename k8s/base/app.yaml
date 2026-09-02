@@ -1,0 +1,122 @@
+# Uygulama: yuklenen belgeler icin disk, calisan container ve servis.
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: itacm-data
+spec:
+  # Longhorn blok diski ayni anda TEK node'a baglanir. Asagidaki replicas: 1
+  # kararinin sebebi bu satir.
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: longhorn-critical
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: itacm
+spec:
+  # Artirilamaz: ikinci kopya ayni diski bekleyip ContainerCreating'de takilir.
+  replicas: 1
+  strategy:
+    # Once eskiyi oldur, sonra yeniyi baslat. Varsayilan RollingUpdate once
+    # yeniyi acmaya calisir, o da ayni diski ister ve kilitlenir.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: itacm
+  template:
+    metadata:
+      labels:
+        app: itacm
+    spec:
+      # securityContext KASITLI olarak yok: giris scripti root baslayip diski
+      # hazirliyor, sonra su-exec ile node kullanicisina dusuyor.
+      # runAsNonRoot: true eklenirse pod HIC acilmaz.
+      imagePullSecrets:
+        - name: harbor-pull
+      containers:
+        - name: itacm
+          # Etiketi her overlay kendi newTag'i ile degistirir.
+          image: harbor.itacm.site/itacm/itacm:PLACEHOLDER
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            # Gizli OLMAYAN ayarlar; her overlay kendi ConfigMap'ini uretir.
+            - configMapRef:
+                name: itacm-env
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: itacm-secrets
+                  key: POSTGRES_PASSWORD
+            # $(POSTGRES_PASSWORD) bir ustteki degiskenden gelir. Parola
+            # baglanti adresine girer ama hicbir dosyada acik yazmaz.
+            # Kural: degisken ayni env listesinde DAHA ONCE tanimli olmali.
+            - name: DATABASE_URL
+              value: postgres://itacm:$(POSTGRES_PASSWORD)@itacm-db:5432/itacm
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: itacm-secrets
+                  key: JWT_SECRET
+            - name: SETUP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: itacm-secrets
+                  key: SETUP_TOKEN
+          volumeMounts:
+            # Giris scripti /proc/mounts'a bakip burasinin gercek bir disk
+            # oldugunu dogruluyor; degilse hata verip cikiyor.
+            - name: data
+              mountPath: /app/data
+          startupProbe:
+            # 5 x 60 = 300 saniye. Bu sure boyunca liveness hic calismaz.
+            # Ilk acilista sema kuruluyor ve migration'lar uygulaniyor.
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            # /api/health veritabanina ulasamayinca 503 doner: pod servisten
+            # cikarilir ama OLDURULMEZ.
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            # Kasitli olarak /api/health DEGIL: PostgreSQL 30 saniye takilirsa
+            # uygulama restart dongusune girerdi.
+            tcpSocket:
+              port: http
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: itacm-data
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: itacm
+spec:
+  selector:
+    app: itacm
+  ports:
+    - name: http
+      port: 80
+      # Numara yerine isim: container portu degisirse burasi degismez.
+      targetPort: http

@@ -1,0 +1,77 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Bu overlay'in urettigi HER nesne bu namespace'e yazilir. Base dosyalarinda
+# hicbir yerde namespace yazmamamizin sebebi bu tek satir.
+namespace: stage
+
+resources:
+  - ../../base
+
+# Gizli olmayan ayarlar. Kustomize adina icerigin hash'ini ekler: deger
+# degisince ad degisir, Deployment'in referansi guncellenir ve pod'lar
+# KENDILIGINDEN yeniden baslar. Elle yazilmis bir ConfigMap'te bu olmaz.
+configMapGenerator:
+  - name: itacm-env
+    literals:
+      - DATA_BACKEND=postgres
+      - DATA_DIR=/app/data
+      - PORT=8000
+      # Onde Cloudflare ve Traefik var: gercek istemci IP'si
+      # X-Forwarded-For'dan okunsun.
+      - TRUST_PROXY=1
+      - APP_URL=https://stage.itacm.site
+      - ADMIN_EMAIL=admin@itacm.site
+
+# CI'daki "yayinla" isi asagidaki newTag satirini gunceller.
+# Terfi mekanizmasinin tamami bu tek satir.
+images:
+  - name: harbor.itacm.site/itacm/itacm
+    newTag: PLACEHOLDER
+
+patches:
+  # Base'de birakilan itacm/ENV yer tutucusunu dolduruyor.
+  - target:
+      kind: ExternalSecret
+      name: itacm-secrets
+    patch: |-
+      - op: replace
+        path: /spec/dataFrom/0/extract/key
+        value: itacm/stage
+
+  # Base'deki PLACEHOLDER adresi.
+  - target:
+      kind: Ingress
+      name: itacm
+    patch: |-
+      - op: replace
+        path: /spec/rules/0/host
+        value: stage.itacm.site
+
+  # Disk boyutlari. Buyutulebilir ama KUCULTULEMEZ.
+  - target:
+      kind: StatefulSet
+      name: itacm-db
+    patch: |-
+      - op: replace
+        path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+        value: 3Gi
+  - target:
+      kind: PersistentVolumeClaim
+      name: itacm-data
+    patch: |-
+      - op: replace
+        path: /spec/resources/requests/storage
+        value: 3Gi
+
+  # Kaynak ayirma: test ortami canlinin kaynagini yemesin.
+  - target:
+      kind: Deployment
+      name: itacm
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 100m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: 512Mi

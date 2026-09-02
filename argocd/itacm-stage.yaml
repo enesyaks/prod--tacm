@@ -1,0 +1,22 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: itacm-stage
+  # Application kayitlari HER ZAMAN argocd namespace'inde durur.
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/enesyaks/prod--tacm.git
+    # Kod dallarini degil deploy dalini izliyor: etiketler orada.
+    targetRevision: deploy
+    path: k8s/overlays/stage
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: stage
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
