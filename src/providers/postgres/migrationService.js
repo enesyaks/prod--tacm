@@ -52,7 +52,9 @@ function run(cmd, args, opts = {}) {
       if (code === 0) resolve({ stdout, stderr });
       else reject(new Error(`${cmd} exited ${code}: ${(stderr || stdout || '').slice(0, 800)}`));
     });
-    if (opts.input) {
+    if (opts.input && child.stdin) {
+      // Ayni EPIPE riski: cocuk surec girdiyi okumadan cikabilir.
+      child.stdin.on('error', () => {});
       child.stdin.write(opts.input);
       child.stdin.end();
     }
@@ -418,6 +420,11 @@ async function restoreDatabase(sqlGzPath) {
       else reject(new Error(`psql restore exited ${code}: ${stderr.slice(0, 1200)}`));
     });
     input.on('error', reject);
+    // psql, ON_ERROR_STOP=1 ile ilk SQL hatasinda kapanir. Boru kapandiktan
+    // sonra yazmaya devam edersek EPIPE gelir; yakalanmazsa TUM SUREC oler.
+    // Yutuyoruz, cunku gercek sebep asagidaki 'close' isleyicisinde
+    // psql'in cikis kodu ve stderr'i ile zaten bildiriliyor.
+    psql.stdin.on('error', () => {});
     input.pipe(psql.stdin);
   });
   try { await pool.query('SELECT 1'); } catch { /* next request gets a fresh client */ }
