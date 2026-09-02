@@ -165,3 +165,70 @@ jobs:
           build-args: FRONTEND_DIGEST=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------
+  yayinla:
+    name: Etiketi deploy dalına yaz
+    needs: [imaj]
+    if: github.event_name == 'push'
+    runs-on: arc-runner-set
+    steps:
+      # Kod dalini degil DEPLOY dalini aliyoruz: etiketler orada durur,
+      # boylece stage ve main saf kod dallari kalir ve aralarindaki merge
+      # fast-forward olarak kalabilir.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.DEPLOY_BRANCH }}
+
+      - name: Hangi ortam
+        id: ortam
+        run: |
+          if [ "$GITHUB_REF" = "refs/heads/stage" ]; then
+            echo "ad=stage" >> "$GITHUB_OUTPUT"
+          else
+            echo "ad=prod" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Etiketi yaz
+        run: |
+          set -eu
+          FILE="k8s/overlays/${{ steps.ortam.outputs.ad }}/kustomization.yaml"
+          # Yazilan numara KOD dalinin commit'i, deploy dalininki degil.
+          sed -i "s|newTag: .*|newTag: ${GITHUB_SHA}|" "$FILE"
+
+          # Etiket zaten dogruysa commit atma: bos commit uretmiyoruz.
+          if git diff --quiet -- "$FILE"; then
+            echo "${{ steps.ortam.outputs.ad }} zaten ${GITHUB_SHA} calistiriyor"
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "deploy(${{ steps.ortam.outputs.ad }}): ${GITHUB_SHA}"
+          git push origin "${{ env.DEPLOY_BRANCH }}"
+
+  # ---------------------------------------------------------------------------
+  terfi:
+    name: main'e terfi
+    needs: [yayinla]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/stage'
+    runs-on: arc-runner-set
+    # Onaylayicilar deponun Settings > Environments ayarinda tanimli.
+    # Is, biri onaylayana kadar KUYRUKTA bekler; runner ayrilmaz.
+    environment: production
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: stage'i main'e taşı
+        run: |
+          set -eu
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout main
+          # --ff-only sart: commit numarasi degismesin ki prod, stage'de
+          # dogrulanan image'in AYNISINI calistirsin.
+          git merge --ff-only "$GITHUB_SHA"
+          git push origin main
