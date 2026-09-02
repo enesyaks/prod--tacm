@@ -1,0 +1,148 @@
+name: CI/CD
+
+on:
+  pull_request:
+    branches: [stage, main]
+  push:
+    branches: [stage, main]
+  workflow_dispatch:
+
+# Varsayilan read'dir. write istiyoruz cunku hattin sonunda image etiketini
+# deploy dalina yazip commit atacagiz.
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # PR'da yeni commit gelirse eskisini bosuna kosturmaya gerek yok. Push'ta ise
+  # iptal etmiyoruz: image gonderimi yarida kesilirse Harbor'da eksik katman kalir.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: harbor.itacm.site/itacm/itacm
+  DEPLOY_BRANCH: deploy
+
+jobs:
+  # ---------------------------------------------------------------------------
+  dogrula:
+    name: Lint + birim testleri (Node ${{ matrix.node }})
+    runs-on: arc-runner-set
+    strategy:
+      fail-fast: false
+      matrix:
+        # 26 uretimde calisan surum (Dockerfile). 20 ise package.json'daki
+        # engines soznun hala tutuldugunu kanitliyor.
+        node: ['26', '20']
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+      - run: npm run lint
+      # Veritabani YOK: birim testlerinin gercekten izole oldugunu kanitliyor.
+      - run: npm test
+
+  # ---------------------------------------------------------------------------
+  entegrasyon:
+    name: Entegrasyon testleri (gerçek PostgreSQL)
+    runs-on: arc-runner-set
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: itacm_ci
+          POSTGRES_PASSWORD: itacm_ci
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        # Bu blok olmadan testler PostgreSQL hazir olmadan baslar ve
+        # ECONNREFUSED alir. GitHub, saglik kontrolu gecene kadar adimlari
+        # baslatmiyor.
+        options: >-
+          --health-cmd "pg_isready -U itacm_ci -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+          cache: npm
+
+      - run: npm ci
+
+      # Degisken verilince test-db.sh kendi container'ini baslatmiyor,
+      # dogrudan testleri kosuyor.
+      - run: npm run test:db
+        env:
+          TEST_DATABASE_URL: postgres://itacm_ci:itacm_ci@localhost:5432/postgres
+
+  # ---------------------------------------------------------------------------
+  imaj:
+    name: Image derle ve gönder
+    # Testler gecmeden image derlenmiyor bile. Argo CD ne varsa onu
+    # calistirdigi icin kapi burada olmak zorunda.
+    needs: [dogrula, entegrasyon]
+    runs-on: arc-runner-set
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+
+      # --- PR yolu: yerelde derle ve tara, gonderme ------------------------
+      # Harbor bu image'i hic gormeyecegi icin taramayi burada yapiyoruz.
+      - name: Derle (PR)
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: itacm-pr:${{ github.sha }}
+          build-args: FRONTEND_DIGEST=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Tara (PR)
+        if: github.event_name == 'pull_request'
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: itacm-pr:${{ github.sha }}
+          exit-code: '1'
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      # --- Merge sonrasi: Harbor'a gonder, taramayi Harbor yapsin ----------
+      - name: Vault'tan Harbor kimliğini al
+        if: github.event_name == 'push'
+        uses: hashicorp/vault-action@v3
+        with:
+          url: http://vault.vault.svc.cluster.local:8200
+          method: kubernetes
+          path: kubernetes
+          role: github-runner
+          secrets: |
+            secret/data/harbor robot_username | HARBOR_USERNAME ;
+            secret/data/harbor robot_password | HARBOR_PASSWORD
+
+      - name: Harbor'a giriş
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: harbor.itacm.site
+          username: ${{ env.HARBOR_USERNAME }}
+          password: ${{ env.HARBOR_PASSWORD }}
+
+      - name: Derle ve gönder
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          build-args: FRONTEND_DIGEST=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
