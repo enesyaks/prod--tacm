@@ -232,3 +232,30 @@ jobs:
           # dogrulanan image'in AYNISINI calistirsin.
           git merge --ff-only "$GITHUB_SHA"
           git push origin main
+
+      - name: Prod etiketini deploy dalına yaz
+        run: |
+          set -eu
+          # main'e push az once GITHUB_TOKEN ile yapildi. GitHub'in dongu
+          # korumasi yuzunden main'de YENI BIR WORKFLOW DOGMAZ; dolayisiyla
+          # "yayinla" isi prod icin hicbir zaman kosmaz. Prod etiketini bu
+          # yuzden burada, terfiyi yapan isin kendisinde yaziyoruz.
+          git fetch origin "$DEPLOY_BRANCH"
+          # -B: dal varsa uzerine yaz. deploy, stage kosusundan bu yana
+          # ilerlemis olabilir; her zaman uzaktaki son hali baz aliyoruz.
+          git checkout -B "$DEPLOY_BRANCH" "origin/$DEPLOY_BRANCH"
+
+          FILE="k8s/overlays/prod/kustomization.yaml"
+          # main artik $GITHUB_SHA'da (fast-forward oldugu icin numara ayni).
+          # Prod'a yazdigimiz etiket, stage'de dogrulanan imajin ta kendisi.
+          sed -i "s|newTag: .*|newTag: ${GITHUB_SHA}|" "$FILE"
+
+          if git diff --quiet -- "$FILE"; then
+            echo "prod zaten ${GITHUB_SHA} calistiriyor"
+            exit 0
+          fi
+
+          # user.name/user.email onceki adimda .git/config'e yazildi,
+          # ayni calisma dizini oldugu icin gecerliligini koruyor.
+          git commit -am "deploy(prod): ${GITHUB_SHA}"
+          git push origin "$DEPLOY_BRANCH"
