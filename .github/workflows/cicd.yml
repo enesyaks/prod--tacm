@@ -163,6 +163,13 @@ jobs:
           push: true
           tags: ${{ env.IMAGE }}:${{ github.sha }}
           build-args: FRONTEND_DIGEST=${{ github.sha }}
+          # buildx varsayilan olarak provenance attestation ekler; bu, push'u
+          # tek manifest yerine index+imaj+attestation ucluse cevirir. Etiketi
+          # index tasidigi ve Harbor index'i taramadigi icin arayuzde imaj
+          # "Not Scanned" gorunur. Kapatinca etiket dogrudan imaj manifestine
+          # bagli kalir, otomatik tarama etikette gorunur ve "Prevent
+          # vulnerable images" politikasi dogru nesne uzerinde calisir.
+          provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
