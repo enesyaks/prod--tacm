@@ -53,7 +53,7 @@ function run(cmd, args, opts = {}) {
       else reject(new Error(`${cmd} exited ${code}: ${(stderr || stdout || '').slice(0, 800)}`));
     });
     if (opts.input && child.stdin) {
-      // Ayni EPIPE riski: cocuk surec girdiyi okumadan cikabilir.
+      // Same EPIPE risk: the child may exit before reading its input.
       child.stdin.on('error', () => {});
       child.stdin.write(opts.input);
       child.stdin.end();
@@ -420,10 +420,10 @@ async function restoreDatabase(sqlGzPath) {
       else reject(new Error(`psql restore exited ${code}: ${stderr.slice(0, 1200)}`));
     });
     input.on('error', reject);
-    // psql, ON_ERROR_STOP=1 ile ilk SQL hatasinda kapanir. Boru kapandiktan
-    // sonra yazmaya devam edersek EPIPE gelir; yakalanmazsa TUM SUREC oler.
-    // Yutuyoruz, cunku gercek sebep asagidaki 'close' isleyicisinde
-    // psql'in cikis kodu ve stderr'i ile zaten bildiriliyor.
+    // ON_ERROR_STOP=1 makes psql exit on the first bad statement. Writing into
+    // the closed pipe then raises EPIPE, and an unhandled 'error' would take the
+    // whole process down. Swallow it: the real cause is already reported by the
+    // 'close' handler above, with psql's exit code and stderr.
     psql.stdin.on('error', () => {});
     input.pipe(psql.stdin);
   });
