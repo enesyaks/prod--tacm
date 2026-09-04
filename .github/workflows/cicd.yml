@@ -30,9 +30,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 26 uretimde calisan surum (Dockerfile). 20 ise package.json'daki
-        # engines soznun hala tutuldugunu kanitliyor.
-        node: ['26', '20']
+        # 26 uretimde calisan surum (Dockerfile). 22 ise package.json'daki
+        # engines soznun hala tutuldugunu kanitliyor — bu is 20'yi kosuyordu ve
+        # pdfjs 6.3 Promise.withResolvers'a (Node 22) bagli oldugu icin taban
+        # yukseldi. Dusuk surumu matriste tutmak, artik veremedigimiz bir sozu
+        # test etmek olurdu.
+        node: ['26', '22']
     steps:
       - uses: actions/checkout@v7
 
