@@ -17,7 +17,7 @@ const PRIORITIES = new Set(['low', 'medium', 'high', 'urgent']);
 const STATUSES = new Set(['new', 'open', 'in_progress', 'pending', 'resolved', 'closed', 'cancelled']);
 const TERMINAL = new Set(['resolved', 'closed', 'cancelled']);
 const LEVELS = new Set(['low', 'medium', 'high']);
-const RESOLUTION_CODES = new Set(['fixed', 'workaround', 'no_fault', 'duplicate', 'not_reproducible', 'user_education']);
+const RESOLUTION_CODES = new Set(['fixed', 'workaround', 'no_fault', 'duplicate', 'not_reproducible', 'user_education', 'spam']);
 
 // ITIL priority = Impact × Urgency (rows = impact, cols = urgency).
 const PRIORITY_MATRIX = Object.freeze({
@@ -276,6 +276,9 @@ const SELECT_COLS = `
   t.response_due_at AS "responseDueAt", t.resolve_due_at AS "resolveDueAt",
   t.response_breached_at AS "responseBreachedAt", t.resolve_breached_at AS "resolveBreachedAt",
   t.sla_paused_at AS "slaPausedAt",
+  t.linked_to_id AS "linkedToId", lt.number AS "linkedToNumber",
+  lt.subject AS "linkedToSubject", lt.status AS "linkedToStatus",
+  t.requester_email AS "requesterEmail",
   t.created_at AS "createdAt", t.updated_at AS "updatedAt"`;
 const FROM_JOINS = `
   FROM tickets t
@@ -283,7 +286,8 @@ const FROM_JOINS = `
   LEFT JOIN users au     ON t.assignee_user_id = au.id
   LEFT JOIN assets a     ON t.asset_id = a.id
   LEFT JOIN problems pr  ON t.problem_id = pr.id
-  LEFT JOIN approval_requests ar ON t.approval_request_id = ar.id`;
+  LEFT JOIN approval_requests ar ON t.approval_request_id = ar.id
+  LEFT JOIN tickets lt   ON t.linked_to_id = lt.id`;
 
 /** Resolve the employee row that owns a self-service (Portal) session, by email. */
 async function employeeForUser(user) {
@@ -416,7 +420,7 @@ async function applyRules(ticket, ctx, a) {
   return outcome;
 }
 
-async function createTicket(body, user, { asEmployee = null, source = 'staff', senderEmail = '' } = {}) {
+async function createTicket(body, user, { asEmployee = null, source = 'staff', senderEmail = '', junk = null } = {}) {
   // Optional request template: forces type=request and carries a category + an
   // approval chain that must clear before the desk fulfils the request.
   let template = null;
@@ -472,20 +476,37 @@ async function createTicket(body, user, { asEmployee = null, source = 'staff', s
     : (PRIORITIES.has(body && body.priority) ? body.priority : 'medium');
 
   const number = await nextNumber(type);
-  const { responseDueAt, resolveDueAt } = slaDueDates(await getSlaConfig(), priority, new Date());
+  // Junk mail is recorded and shut in the same act: it arrived, this is what it
+  // was, and it was never work. No SLA clock is started — a newsletter must not
+  // count against the desk's response time — and nothing is sent back to the
+  // sender, because answering an advert is how an address gets more of them.
+  const { responseDueAt, resolveDueAt } = junk
+    ? { responseDueAt: null, resolveDueAt: null }
+    : slaDueDates(await getSlaConfig(), priority, new Date());
+  // The address an emailed ticket arrived from is kept even when it matches an
+  // employee: it is how "the same sender wrote twice" is answered for people the
+  // install has no row for, and it costs nothing to store for the ones it does.
+  const fromAddr = source === 'email' ? String(senderEmail || '').trim().slice(0, 320) || null : null;
   const { rows } = await query(
     `INSERT INTO tickets (number, type, subject, description, priority, category,
         requester_employee_id, requester_user_id, asset_id, created_by, created_by_name, status,
-        response_due_at, resolve_due_at, impact, urgency)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, 'new', $12, $13, $14, $15)
+        response_due_at, resolve_due_at, impact, urgency, requester_email,
+        closed_at, resolution_code, resolution_note)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$17, $12, $13, $14, $15, $16, $18, $19, $20)
      RETURNING id`,
-    [number, type, subject, description || null, priority, category,
+    [number, type, subject, description || null, junk ? 'low' : priority, category,
       requesterEmployeeId, asEmployee ? null : a.id, assetId, a.id, a.name,
-      responseDueAt, resolveDueAt, effImpact, effUrgency]
+      responseDueAt, resolveDueAt, effImpact, effUrgency, fromAddr,
+      junk ? 'closed' : 'new', junk ? new Date() : null,
+      junk ? 'spam' : null, junk ? String(junk.reason || 'bulk mail').slice(0, 500) : null]
   );
   const id = rows[0].id;
-  await logActivity(id, a, 'created', `${type} · ${priority}`);
+  await logActivity(id, a, 'created', `${type} · ${junk ? 'low' : priority}`);
+  if (junk) await logActivity(id, a, 'status', `closed as spam — ${junk.reason || 'bulk mail'}`);
   audit('ticket.create', `Opened ${number}: ${subject}`, a, id, number);
+  // Rules can categorise, escalate and assign; none of that is wanted for a
+  // ticket that is already shut, and an assignment would put junk in a queue.
+  if (junk) return getTicket(id, user);
 
   // Automation rules run BEFORE the approval chain: a rule may re-categorise or
   // escalate the ticket, and the approval summary should carry the final values.
@@ -597,6 +618,9 @@ async function getTicket(id, user, { ownEmployeeId = null } = {}) {
     );
     ticket.activity = activity;
     ticket.similar = await findSimilar(ticket);
+    ticket.linked = await linkedTickets(id);
+    // Only worth offering when this ticket can actually take followers.
+    ticket.duplicateCandidates = ticket.linkedToId ? [] : await duplicateCandidates(ticket);
   }
   return ownEmployeeId ? stripSla(ticket) : decorateSla(ticket);
 }
@@ -631,6 +655,116 @@ async function findSimilar(ticket) {
     );
     return rows;
   } catch { return []; }
+}
+
+/* ------------------------------- duplicates ------------------------------- */
+
+/** The tickets that close when this one does. */
+async function linkedTickets(id) {
+  const { rows } = await query(
+    `SELECT t.id, t.number, t.subject, t.status, t.priority, t.created_at AS "createdAt",
+            re.full_name AS "requesterName"
+       FROM tickets t
+       LEFT JOIN employees re ON re.id = t.requester_employee_id
+      WHERE t.linked_to_id = $1
+      ORDER BY t.created_at ASC`, [id]
+  );
+  return rows;
+}
+
+/**
+ * Other OPEN tickets from the same person, offered as candidates to link.
+ *
+ * "The same person" is two things, because a ticket can arrive with either
+ * identity and sometimes only one: the employee row when the requester is known
+ * to the install, and the address the mail came from when they are not. Matching
+ * on both is what makes "the same sender wrote twice" work for an outsider who
+ * has no employee record at all.
+ *
+ * Only open tickets, only unlinked ones, and never a ticket that already has
+ * followers of its own — linking is one level deep, so a candidate that is
+ * already somebody's master would have to be re-parented, which is a merge and
+ * not what this is. Best-effort: never throws.
+ */
+async function duplicateCandidates(ticket) {
+  try {
+    if (!ticket) return [];
+    const empId = ticket.requesterEmployeeId || null;
+    const email = String(ticket.requesterEmail || '').trim().toLowerCase() || null;
+    if (!empId && !email) return [];
+    const { rows } = await query(
+      `SELECT t.id, t.number, t.subject, t.status, t.priority, t.created_at AS "createdAt",
+              re.full_name AS "requesterName", t.requester_email AS "requesterEmail"
+         FROM tickets t
+         LEFT JOIN employees re ON re.id = t.requester_employee_id
+        WHERE t.id <> $1
+          AND t.status NOT IN ('resolved', 'closed', 'cancelled')
+          AND t.linked_to_id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM tickets c WHERE c.linked_to_id = t.id)
+          AND ( ($2::uuid IS NOT NULL AND t.requester_employee_id = $2)
+             OR ($3::text IS NOT NULL AND lower(t.requester_email) = $3) )
+        ORDER BY t.created_at DESC
+        LIMIT 10`,
+      [ticket.id, empId, email]
+    );
+    return rows;
+  } catch { return []; }
+}
+
+/**
+ * Link tickets to this one as duplicates of it. Their numbers, requesters and
+ * history stay; what changes is that closing this ticket now closes them too.
+ *
+ * The rules exist so "what closes this" is always answerable in one hop:
+ * a master may not itself be linked, a ticket that already has followers may not
+ * become one, and nothing terminal is linked (there would be nothing to cascade).
+ */
+async function linkTickets(masterId, childIds, user) {
+  if (!isUuid(masterId)) throw HttpError.notFound('Ticket not found');
+  const ids = [...new Set((Array.isArray(childIds) ? childIds : [childIds])
+    .map((x) => String(x || '')).filter(isUuid))];
+  if (!ids.length) throw HttpError.badRequest('Choose at least one ticket to link');
+  if (ids.includes(masterId)) throw HttpError.badRequest('A ticket cannot be linked to itself');
+
+  const a = actor(user);
+  const master = (await query('SELECT id, number, status, linked_to_id FROM tickets WHERE id = $1', [masterId])).rows[0];
+  if (!master) throw HttpError.notFound('Ticket not found');
+  if (master.linked_to_id) throw HttpError.badRequest('This ticket is itself linked to another one — link them to that one instead');
+
+  const { rows: children } = await query(
+    'SELECT id, number, status, linked_to_id FROM tickets WHERE id = ANY($1::uuid[])', [ids]
+  );
+  if (children.length !== ids.length) throw HttpError.notFound('One of those tickets no longer exists');
+  for (const c of children) {
+    if (TERMINAL.has(c.status)) throw HttpError.badRequest(`${c.number} is already ${c.status} — there is nothing left to link`);
+    if (c.linked_to_id && c.linked_to_id !== masterId) throw HttpError.badRequest(`${c.number} is already linked to another ticket`);
+    const { rows: own } = await query('SELECT number FROM tickets WHERE linked_to_id = $1 LIMIT 1', [c.id]);
+    if (own[0]) throw HttpError.badRequest(`${c.number} has tickets linked to it already (${own[0].number}) — unlink those first`);
+  }
+
+  await query('UPDATE tickets SET linked_to_id = $1, updated_at = now() WHERE id = ANY($2::uuid[])', [masterId, ids]);
+  for (const c of children) {
+    await logActivity(c.id, a, 'linked', `linked to ${master.number}`);
+  }
+  await logActivity(masterId, a, 'linked', `${children.map((c) => c.number).join(', ')} linked to this ticket`);
+  audit('ticket.link', `Linked ${children.map((c) => c.number).join(', ')} to ${master.number}`, a, masterId, master.number);
+  return { linked: await linkedTickets(masterId) };
+}
+
+/** Detach one follower. Its own status is untouched — it just stops following. */
+async function unlinkTicket(masterId, childId, user) {
+  if (!isUuid(masterId) || !isUuid(childId)) throw HttpError.notFound('Ticket not found');
+  const a = actor(user);
+  const { rows } = await query(
+    'UPDATE tickets SET linked_to_id = NULL, updated_at = now() WHERE id = $1 AND linked_to_id = $2 RETURNING number',
+    [childId, masterId]
+  );
+  if (!rows[0]) throw HttpError.notFound('That ticket is not linked to this one');
+  const master = (await query('SELECT number FROM tickets WHERE id = $1', [masterId])).rows[0];
+  await logActivity(childId, a, 'linked', `unlinked from ${master ? master.number : 'the other ticket'}`);
+  await logActivity(masterId, a, 'linked', `${rows[0].number} unlinked`);
+  audit('ticket.unlink', `Unlinked ${rows[0].number} from ${master ? master.number : masterId}`, a, masterId, master && master.number);
+  return { linked: await linkedTickets(masterId) };
 }
 
 // Whitelisted sort keys → SQL. Priority/status sort by workflow order, not
@@ -973,6 +1107,7 @@ async function updateTicket(id, patch, user) {
   const slaTargets = await getSlaConfig(); // read before the tx (separate connection)
   const workflow = await getWorkflow();    // effective (editable) status transition map
   let plan = null;
+  let cascade = null;
   await withTransaction(async (t) => {
     const { rows } = await t.query('SELECT * FROM tickets WHERE id = $1 FOR UPDATE', [id]);
     const cur = rows[0];
@@ -1105,12 +1240,68 @@ async function updateTicket(id, patch, user) {
     }
     audit('ticket.update', `Updated ${cur.number}`, a, id, cur.number);
     if (statusTo || newAssigneeId) {
-      plan = { id, number: cur.number, subject: cur.subject, actorName: a.name,
+      plan = { id, number: cur.number, subject: cur.subject, actorName: a.name, actorEmail: a.email,
         requesterEmployeeId: cur.requester_employee_id, statusTo, newAssigneeId };
+    }
+    if (statusTo && TERMINAL.has(statusTo)) {
+      cascade = { status: statusTo, number: cur.number };
     }
   });
   if (plan) notifyUpdate(plan);
+  // Duplicates follow their master out. Done after the transaction commits so a
+  // follower that cannot be updated never rolls back the ticket the operator
+  // actually acted on.
+  if (cascade) await closeLinked(id, cascade, a);
   return getTicket(id, user);
+}
+
+/**
+ * Carry a terminal status to the tickets linked to this one.
+ *
+ * Written straight to the rows rather than routed back through updateTicket, on
+ * purpose: the transition map and the "classify before you close" rule are there
+ * to hold a PERSON to a workflow, and a follower is not being worked — it is
+ * being closed by the same act that closed its master. Making the operator
+ * classify four duplicates before they may close the one they solved is exactly
+ * the busywork the link is meant to remove.
+ *
+ * The master's resolution is copied down where a follower has none, so each
+ * requester reads why their own ticket ended, and each is notified separately.
+ */
+async function closeLinked(masterId, { status, number }, a) {
+  try {
+    const stamp = status === 'closed' ? 'closed_at' : (status === 'resolved' ? 'resolved_at' : null);
+    const { rows } = await query(
+      `UPDATE tickets t
+          SET status = $2,
+              ${stamp ? `${stamp} = now(),` : ''}
+              sla_paused_at = NULL,
+              resolution_code = COALESCE(t.resolution_code, m.resolution_code),
+              resolution_note = COALESCE(t.resolution_note, m.resolution_note),
+              updated_at = now()
+         FROM tickets m
+        WHERE t.linked_to_id = $1 AND m.id = $1
+          AND t.status NOT IN ('resolved', 'closed', 'cancelled')
+        RETURNING t.id, t.number, t.subject, t.requester_employee_id AS "requesterEmployeeId"`,
+      [masterId, status]
+    );
+    for (const child of rows) {
+      await logActivity(child.id, a, 'status', `${status} — with ${number}`);
+      notifyUpdate({
+        id: child.id, number: child.number, subject: child.subject, actorName: a.name, actorEmail: a.email,
+        requesterEmployeeId: child.requesterEmployeeId, statusTo: status, newAssigneeId: null,
+      });
+    }
+    if (rows.length) {
+      audit('ticket.update', `${rows.map((r) => r.number).join(', ')} ${status} with ${number}`, a, masterId, number);
+    }
+    return rows;
+  } catch (err) {
+    // A follower that would not close must not take the master's close with it;
+    // it stays open and visible in the link list.
+    console.error('[tickets] linked tickets not carried along:', err.message);
+    return [];
+  }
 }
 
 async function addComment(id, body, user, { ownEmployeeId = null } = {}) {
@@ -1133,7 +1324,15 @@ async function addComment(id, body, user, { ownEmployeeId = null } = {}) {
   if (!ownEmployeeId && !internal) {
     await query('UPDATE tickets SET first_response_at = COALESCE(first_response_at, now()), updated_at = now() WHERE id = $1', [id]);
   }
-  notifyComment({ id, ownEmployeeId, internal, snippet: text.slice(0, 200), body: text, actorName: a.name });
+  notifyComment({
+    id, ownEmployeeId, internal, snippet: text.slice(0, 200), body: text,
+    actorName: a.name, actorEmail: a.email,
+    // The client posts the comment first and uploads its files afterwards (it
+    // needs the comment's id to link them to). So at this moment the comment has
+    // no attachments yet, and the mail that went out never mentioned them. The
+    // count tells the notifier how many to wait for.
+    attachmentCount: Math.min(10, Math.max(0, Number(body && body.attachmentCount) || 0)),
+  });
   const ticket = await getTicket(id, user, { ownEmployeeId });
   ticket.newCommentId = commentId; // lets the client link freshly-uploaded files
   return ticket;
@@ -1406,10 +1605,25 @@ function mail(opts) {
   } catch { /* ignore */ }
 }
 
+/**
+ * Nobody is told what they just did themselves.
+ *
+ * A staff member is often the requester too — they open a ticket for their own
+ * laptop, then work it. Without this they get their own reply back as mail, and
+ * a mail that quotes you to yourself reads as a bug in the system, because it is.
+ */
+function isSelf(address, actorEmail) {
+  const a = String(address || '').trim().toLowerCase();
+  const b = String(actorEmail || '').trim().toLowerCase();
+  return !!a && a === b;
+}
+
 // Notify after an update (status change → requester; new assignee → assignee).
 function notifyUpdate(plan) {
   (async () => {
     const p = await partyEmails({ requesterEmployeeId: plan.requesterEmployeeId, assigneeUserId: plan.newAssigneeId });
+    if (isSelf(p.requesterEmail, plan.actorEmail)) p.requesterEmail = null;
+    if (isSelf(p.assigneeEmail, plan.actorEmail)) p.assigneeEmail = null;
     if (plan.statusTo && p.requesterEmail) {
       mail({ to: p.requesterEmail, ticketId: plan.id, ticketNumber: plan.number, subject: plan.subject, event: `status changed to “${plan.statusTo}”`, actorName: plan.actorName });
     }
@@ -1427,8 +1641,41 @@ function notifyUpdate(plan) {
   })().catch(() => {});
 }
 
+/**
+ * Wait for the files a comment is about to receive.
+ *
+ * The client cannot upload them before the comment exists — it needs the
+ * comment's id to link them — so the reply mail was always composed against a
+ * comment with no attachments and went out saying nothing about them. Rather
+ * than reshape the upload contract, the mail waits a few seconds for the files
+ * the client said were coming, and sends whatever has landed by then.
+ *
+ * Public files only: an internal or staff-only attachment must never leave with
+ * a mail to the requester, whatever it was posted alongside.
+ */
+async function awaitCommentFiles(ticketId, expected, { timeoutMs = 12000, stepMs = 300 } = {}) {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    // Counted over every file that landed, returned as only the public ones:
+    // the wait is "has the client finished uploading", which a staff-only file
+    // answers just as well as a public one — while sending it would leak it.
+    const { rows } = await query(
+      `SELECT id, filename, mime, byte_size AS "byteSize",
+              (internal = false AND staff_only = false) AS "public"
+         FROM ticket_documents
+        WHERE ticket_id = $1 AND comment_id IS NOT NULL
+          AND created_at > now() - interval '2 minutes'
+        ORDER BY created_at ASC`, [ticketId]
+    ).catch(() => ({ rows: [] }));
+    if (rows.length >= expected || Date.now() >= until) {
+      return rows.filter((r) => r.public).map(({ id, filename, mime, byteSize }) => ({ id, filename, mime, byteSize }));
+    }
+    await new Promise((r) => setTimeout(r, stepMs));
+  }
+}
+
 // Notify after a comment (staff public reply → requester; employee reply → assignee).
-function notifyComment({ id, ownEmployeeId, internal, snippet, body, actorName }) {
+function notifyComment({ id, ownEmployeeId, internal, snippet, body, actorName, actorEmail, attachmentCount = 0 }) {
   if (internal) return; // internal notes never leave the building
   (async () => {
     const meta = (await query(
@@ -1436,15 +1683,18 @@ function notifyComment({ id, ownEmployeeId, internal, snippet, body, actorName }
     )).rows[0];
     if (!meta) return;
     const p = await partyEmails(meta);
+    if (isSelf(p.requesterEmail, actorEmail)) p.requesterEmail = null;
+    if (isSelf(p.assigneeEmail, actorEmail)) p.assigneeEmail = null;
     const inapp = require('./inappService');
     if (!ownEmployeeId) {
       // Staff public reply → email the requester the reply itself (threaded so
       // their answer comes back onto the ticket) + an in-app bell.
       if (p.requesterEmail) {
+        const files = attachmentCount ? await awaitCommentFiles(id, attachmentCount) : [];
         try {
           require('./notificationService').sendTicketReply({
             to: p.requesterEmail, ticketId: id, ticketNumber: meta.number, subject: meta.subject,
-            replyText: body || snippet || '', actorName,
+            replyText: body || snippet || '', actorName, files,
           }).catch(() => {});
         } catch { /* ignore */ }
       }
@@ -1489,5 +1739,5 @@ module.exports = {
   sweepSlaBreaches, SLA_TARGETS, stats, report, agentReport, slaDetail, getSlaConfig, saveSlaConfig, categories,
   getCannedResponses, saveCannedResponses, getManagedCategories, saveManagedCategories,
   getWorkflow, saveWorkflow, resetWorkflow, sweepAutoCloseResolved,
-  ackTarget,
+  ackTarget, linkTickets, unlinkTicket, linkedTickets, duplicateCandidates,
 };

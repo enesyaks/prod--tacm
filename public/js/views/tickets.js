@@ -15,7 +15,7 @@ const TK_PRIORITY_MATRIX = {
   low: { high: 'medium', medium: 'low', low: 'low' },
 };
 const tkDerivePriority = (impact, urgency) => (TK_PRIORITY_MATRIX[impact] && TK_PRIORITY_MATRIX[impact][urgency]) || null;
-const TK_RESOLUTION_CODES = ['fixed', 'workaround', 'no_fault', 'duplicate', 'not_reproducible', 'user_education'];
+const TK_RESOLUTION_CODES = ['fixed', 'workaround', 'no_fault', 'duplicate', 'not_reproducible', 'user_education', 'spam'];
 const tkStars = (n) => `<span class="tk-stars" title="${n}/5">${'★'.repeat(n)}<span class="tk-stars-off">${'★'.repeat(5 - n)}</span></span>`;
 const tkStatusLabel = (s) => t('tk.status.' + s) || s;
 const tkPriorityLabel = (p) => t('tk.priority.' + p) || p;
@@ -1685,6 +1685,30 @@ Views.tickets = async function (el, params = {}) {
       </div>`).join('') || `<p class="cell-sub">${esc(t('tk.noComments'))}</p>`;
     const activity = (tk.activity || []).map((a) => `<li><span class="cell-sub">${esc(String(a.createdAt || '').replace('T', ' ').slice(0, 16))}</span> · ${esc(a.actorName || '')} — ${esc(a.action)}${a.detail ? ' (' + esc(a.detail) + ')' : ''}</li>`).join('');
 
+    // Duplicates. The same problem arrives twice all the time — someone writes
+    // in again after hearing nothing, four people report one dead printer — so
+    // the people who already have an open ticket are listed right here, and
+    // linking them makes this one ticket close them all.
+    const linked = tk.linked || [];
+    const candidates = tk.duplicateCandidates || [];
+    const lnkRow = (x, tail) => `<div class="tkd-lnk prio-${esc(x.priority || 'medium')}">
+        <span class="tkd-lnk-no mono" data-open="${esc(x.id)}">${esc(x.number)}</span>
+        <span class="tkd-lnk-subj" data-open="${esc(x.id)}">${esc(x.subject)}</span>
+        ${pill(TK_STATUS_PILL[x.status] || 'pill-slate', tkStatusLabel(x.status))}
+        <span class="cell-sub">${esc(String(x.createdAt || '').slice(0, 10))}</span>
+        ${tail}
+      </div>`;
+    const dupSection = (linked.length || candidates.length) ? `<section class="tkd-sec tkd-lnk-sec">
+        <h4 class="tkd-h tkd-h-sm"><span class="ms ms-sm" style="vertical-align:-3px">merge</span> ${esc(t('tk.linkTitle'))}${linked.length ? ` <span class="cell-sub">(${linked.length})</span>` : ''}</h4>
+        ${linked.length ? `<p class="cell-sub tkd-lnk-note">${esc(t('tk.linkedHint'))}</p>
+          <div class="tkd-lnk-list">${linked.map((x) => lnkRow(x, canUpdate
+            ? `<button type="button" class="btn-link tkd-lnk-off" data-unlink="${esc(x.id)}">${esc(t('tk.linkRemove'))}</button>` : '')).join('')}</div>` : ''}
+        ${candidates.length ? `<p class="cell-sub tkd-lnk-note">${esc(t('tk.linkCandHint'))}</p>
+          <div class="tkd-lnk-list">${candidates.map((x) => lnkRow(x, canUpdate
+            ? `<input type="checkbox" class="tkd-lnk-pick" value="${esc(x.id)}" aria-label="${esc(x.number)}">` : '')).join('')}</div>
+          ${canUpdate ? `<button type="button" class="btn btn-outline btn-sm tkd-lnk-go" id="tk-link-go" disabled>${esc(t('tk.linkAction'))}</button>` : ''}` : ''}
+      </section>` : '';
+
     openModal({
       title: `${tk.number} · ${tk.subject}`,
       xwide: true,
@@ -1701,12 +1725,18 @@ Views.tickets = async function (el, params = {}) {
               <div class="tkd-submeta">${esc(tkTypeLabel(tk.type))}${tk.requesterName ? ' · ' + esc(tk.requesterName) : ''} · <span class="ms ms-sm">schedule</span> ${esc(String(tk.createdAt || '').replace('T', ' ').slice(0, 16))}</div>
             </div>
           </div>
+          ${tk.linkedToId ? `<div class="tkd-linked-banner">
+            <span class="ms ms-sm">merge</span>
+            <span>${esc(t('tk.linkedBanner').replace('{n}', tk.linkedToNumber || ''))}</span>
+            <button type="button" class="btn-link" data-open="${esc(tk.linkedToId)}">${esc(t('tk.linkOpenMaster'))}</button>
+          </div>` : ''}
           <div class="tkd-grid">
             <div class="tkd-main">
               <section class="tkd-sec">
                 <h4 class="tkd-h">${esc(t('tk.description'))}</h4>
                 <div class="tk-desc">${esc(tk.description || '—').replace(/\n/g, '<br>')}</div>
               </section>
+              ${dupSection}
               <section class="tkd-sec">
                 <h4 class="tkd-h">${esc(t('tk.worklog'))}</h4>
                 <div class="tk-comments">${comments}</div>
@@ -1817,6 +1847,32 @@ Views.tickets = async function (el, params = {}) {
         // Click a similar past ticket to open it.
         ov.querySelectorAll('.tkd-sim[data-open]').forEach((row) => row.addEventListener('click', () => {
           if (row.dataset.open) { closeModal(); openTicket(row.dataset.open); }
+        }));
+        // Duplicates: open one, link the ones that are the same problem, detach
+        // one that turned out not to be.
+        ov.querySelectorAll('.tkd-linked-banner [data-open], .tkd-lnk [data-open]').forEach((el) =>
+          el.addEventListener('click', () => { closeModal(); openTicket(el.dataset.open); }));
+        const picks = () => [...ov.querySelectorAll('.tkd-lnk-pick:checked')].map((c) => c.value);
+        const goBtn = $('#tk-link-go', ov);
+        ov.querySelectorAll('.tkd-lnk-pick').forEach((c) => c.addEventListener('change', () => {
+          if (goBtn) goBtn.disabled = picks().length === 0;
+        }));
+        goBtn?.addEventListener('click', async () => {
+          const ids = picks();
+          if (!ids.length) return;
+          goBtn.disabled = true;
+          try {
+            await api('/tickets/' + encodeURIComponent(id) + '/links', { method: 'POST', body: { ticketIds: ids } });
+            toast(t('tk.linkDone').replace('{n}', ids.length), 'success');
+            closeModal(); openTicket(id); refresh();
+          } catch (err) { toast(err.message, 'error'); goBtn.disabled = false; }
+        });
+        ov.querySelectorAll('[data-unlink]').forEach((b) => b.addEventListener('click', async () => {
+          try {
+            await api('/tickets/' + encodeURIComponent(id) + '/links/' + encodeURIComponent(b.dataset.unlink), { method: 'DELETE' });
+            toast(t('tk.unlinkDone'), 'success');
+            closeModal(); openTicket(id); refresh();
+          } catch (err) { toast(err.message, 'error'); }
         }));
         // Visibility segmented selector (Everyone / Approvers-only / IT-team-only);
         // the chosen level lives on the group's data-vis.
@@ -2005,7 +2061,10 @@ Views.tickets = async function (el, params = {}) {
           if (!body && !replyStaged.length) return;
           const vf = visFlags('#tk-d-vis');
           try {
-            const resp = await api('/tickets/' + encodeURIComponent(id) + '/comments', { method: 'POST', body: { body: body || t('tk.fileOnlyComment'), internal: vf.internal, staffOnly: vf.staffOnly } });
+            // The files can only be linked after the comment exists, so tell the
+            // server how many are coming — otherwise the mail to the requester
+            // goes out before they land and never mentions them.
+            const resp = await api('/tickets/' + encodeURIComponent(id) + '/comments', { method: 'POST', body: { body: body || t('tk.fileOnlyComment'), internal: vf.internal, staffOnly: vf.staffOnly, attachmentCount: replyStaged.length } });
             const commentId = resp && resp.newCommentId;
             for (const f of replyStaged) {
               try { await api('/tickets/' + encodeURIComponent(id) + '/documents', { method: 'POST', body: { base64: await readReplyB64(f), filename: f.name, internal: vf.internal, staffOnly: vf.staffOnly, commentId } }); }

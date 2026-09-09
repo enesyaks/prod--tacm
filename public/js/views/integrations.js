@@ -1105,10 +1105,18 @@ GET /api/integrations/licenses/:id/sam
       icon: 'block',
       wide: true,
       body: `
-        <label style="display:flex;gap:8px;align-items:flex-start;margin:0 0 14px">
+        <label style="display:flex;gap:8px;align-items:flex-start;margin:0 0 8px">
           <input type="checkbox" id="imapblk-bulk" ${cfg.blockBulk ? 'checked' : ''}>
           <span>${esc(t('int.inbound.blockBulk'))}<br><span class="ob-hint">${esc(t('int.inbound.blockBulkHint'))}</span></span>
         </label>
+        <div class="form-field full" style="margin:0 0 14px 26px">
+          <label>${esc(t('int.inbound.bulkAction'))}</label>
+          <select id="imapblk-bulkaction">
+            <option value="skip" ${cfg.bulkAction !== 'close' ? 'selected' : ''}>${esc(t('int.inbound.bulkSkip'))}</option>
+            <option value="close" ${cfg.bulkAction === 'close' ? 'selected' : ''}>${esc(t('int.inbound.bulkClose'))}</option>
+          </select>
+          <span class="ob-hint">${esc(t('int.inbound.bulkActionHint'))}</span>
+        </div>
         <div class="form-field full" style="margin:0">
           <label>${esc(t('int.inbound.block'))}</label>
           <div style="display:flex;gap:8px">
@@ -1160,6 +1168,13 @@ GET /api/integrations/licenses/:id/sam
         };
         renderList(); renderSkips();
         $('#imapblk-add', overlay).addEventListener('click', () => { if (add(input.value)) input.value = ''; });
+        // The disposition only decides what happens to mail the bulk test
+        // catches, so it means nothing while that test is off.
+        const bulkBox = $('#imapblk-bulk', overlay);
+        const bulkAct = $('#imapblk-bulkaction', overlay);
+        const syncBulk = () => { if (bulkAct) bulkAct.disabled = !bulkBox.checked; };
+        bulkBox?.addEventListener('change', syncBulk);
+        syncBulk();
         input.addEventListener('keydown', (ev) => {
           if (ev.key !== 'Enter') return;
           ev.preventDefault();
@@ -1195,7 +1210,11 @@ GET /api/integrations/licenses/:id/sam
           try {
             await api('/integrations/inbound-mail/blocklist', {
               method: 'PUT',
-              body: { blocklist: list, blockBulk: !!$('#imapblk-bulk', overlay).checked },
+              body: {
+                blocklist: list,
+                blockBulk: !!$('#imapblk-bulk', overlay).checked,
+                bulkAction: $('#imapblk-bulkaction', overlay)?.value || 'skip',
+              },
             });
             toast(t('int.inbound.blockSaved'), 'success');
             closeModal();
