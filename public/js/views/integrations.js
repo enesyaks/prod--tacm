@@ -152,6 +152,16 @@ Views.integrations = async function (el, params = {}) {
             <label><input type="checkbox" id="int-notify-ho" ${notify.handoverCompleted ? 'checked' : ''}${chkDis}> Email on handover</label>
             <label title="Notify the requester and assignee on replies, status changes and assignment."><input type="checkbox" id="int-notify-tickets" ${notify.ticketUpdates ? 'checked' : ''}${chkDis}> Email on ticket updates</label>
           </div>
+          <div class="form-field full" style="display:flex;flex-direction:column;gap:8px">
+            <label style="display:flex;gap:8px;align-items:flex-start;margin:0">
+              <input type="checkbox" id="int-notify-ack" ${notify.ticketAck !== false ? 'checked' : ''}${chkDis}>
+              <span>${esc(t('int.notify.ack'))}<br><span class="ob-hint">${esc(t('int.notify.ackHint'))}</span></span>
+            </label>
+            <label style="display:flex;gap:8px;align-items:flex-start;margin:0 0 0 22px">
+              <input type="checkbox" id="int-notify-ack-unknown" ${notify.ackUnknownSenders ? 'checked' : ''}${chkDis}>
+              <span>${esc(t('int.notify.ackUnknown'))}<br><span class="ob-hint">${esc(t('int.notify.ackUnknownHint'))}</span></span>
+            </label>
+          </div>
           <div class="form-field full" style="display:flex;flex-wrap:wrap;gap:12px;align-items:center">
             <label style="display:flex;align-items:center;gap:6px">Auto-send
               <select id="int-notify-schedule"${inputDis}>
@@ -378,6 +388,10 @@ Views.integrations = async function (el, params = {}) {
           <div class="form-field"><label style="padding-top:26px"><input type="checkbox" id="int-imap-secure" ${inbound.secure !== false ? 'checked' : ''}${chkDis}> TLS (SSL)</label></div>
           <div class="form-field full"><label><input type="checkbox" id="int-imap-enabled" ${inbound.enabled ? 'checked' : ''}${chkDis}> ${esc(t('int.inbound.enable'))}</label>
             <span class="ob-hint">${esc(t('int.inbound.enableHint'))}</span></div>
+          <div class="form-field full">
+            <span class="ob-hint">${inbound.watch
+              ? esc(t('int.inbound.watching').replace('{folder}', inbound.watch.folder || 'INBOX').replace('{uid}', inbound.watch.uid))
+              : esc(t('int.inbound.watchingNone'))}</span></div>
         </div>
         ${canManage ? `<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
           <button class="btn btn-primary" id="int-imap-save">${esc(t('common.save'))}</button>
@@ -1022,8 +1036,16 @@ GET /api/integrations/licenses/:id/sam
       ].filter(Boolean).join('');
       const opened = (r.created || 0) + (r.appended || 0);
       const done = t('int.inbound.pollDone').replace('{n}', opened) + extra
+        + (r.capped ? ' ' + t('int.inbound.pollCapped') : '')
         + (!opened && !extra ? ' ' + t('int.inbound.pollNothing') : '');
-      toast(r.skipped ? (t('int.inbound.pollSkipped') + (r.reason ? ' (' + r.reason + ')' : '')) : done, r.skipped ? 'error' : 'success'); }
+      // First look at a mailbox: what is already in it is history, and saying so
+      // is the difference between "it works" and "it ignored my test mail".
+      const adopted = r.adopted
+        ? t('int.inbound.pollAdopted').replace('{n}', r.adopted.existing).replace('{folder}', r.adopted.folder)
+        : '';
+      toast(r.skipped ? (t('int.inbound.pollSkipped') + (r.reason ? ' (' + r.reason + ')' : '')) : (adopted || done),
+        r.skipped ? 'error' : 'success');
+      if (r.adopted) Views.integrations(el); }
     catch (err) { toast(err.message, 'error'); }
     finally { btn.disabled = false; btn.textContent = label; }
   });
@@ -1216,6 +1238,8 @@ GET /api/integrations/licenses/:id/sam
             to,
             handoverCompleted: $('#int-notify-ho', el).checked,
             ticketUpdates: $('#int-notify-tickets', el).checked,
+            ticketAck: $('#int-notify-ack', el).checked,
+            ackUnknownSenders: $('#int-notify-ack-unknown', el).checked,
             schedule: $('#int-notify-schedule', el).value,
             hour: Number($('#int-notify-hour', el).value),
             weekday: Number($('#int-notify-weekday', el).value),
@@ -1263,6 +1287,8 @@ GET /api/integrations/licenses/:id/sam
             to: toList,
             handoverCompleted: $('#int-notify-ho', el).checked,
             ticketUpdates: $('#int-notify-tickets', el).checked,
+            ticketAck: $('#int-notify-ack', el).checked,
+            ackUnknownSenders: $('#int-notify-ack-unknown', el).checked,
             schedule: $('#int-notify-schedule', el).value,
             hour: Number($('#int-notify-hour', el).value),
             weekday: Number($('#int-notify-weekday', el).value),
@@ -1440,6 +1466,27 @@ GET /api/integrations/licenses/:id/sam
       alertCount: '4',
       alertSummary: 'Expired licenses (2)\n  - Adobe CC · 2026-06-30\n\nLow stock (2)\n  - Toner 26X: 1/5',
       credentials: 'Sign in with your existing credentials and MFA.',
+      // Service-desk placeholders. Without these the ticket templates previewed
+      // as raw {{braces}} — the one screen where they should read as mail.
+      ticketNumber: 'INC-1042',
+      subject: 'Printer on the third floor is offline',
+      requesterName: 'Ada Lovelace',
+      priority: 'high',
+      event: 'status changed to “in progress”',
+      actorName: 'Deniz · IT',
+      snippet: 'Toner has been ordered.',
+      replyText: 'The replacement toner is ordered and arrives tomorrow morning.',
+      slaType: 'Resolution',
+      dueAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
+      overdueBy: '1h 20m',
+      assigneeName: 'Deniz · IT',
+      ticketUrl: ((typeof location !== 'undefined' && location.origin) || 'http://localhost:8000')
+        + '/#/tickets?open=4f6a1c2e-0000-4000-8000-000000000000',
+      // Approvals
+      summary: 'New laptop for Ada Lovelace',
+      resourceRef: ' (REQ-2087)',
+      decision: 'approved',
+      deciderName: 'Approved by Mehmet Y. · Finance',
     };
     const subject = applyEmailTplPreviewVars($('#int-tpl-subject', el)?.value || '', vars, { html: false });
     const bodyHtml = applyEmailTplPreviewVars($('#int-tpl-html', el)?.value || '', vars, { html: true });
