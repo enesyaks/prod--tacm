@@ -27,7 +27,7 @@ configMapGenerator:
 # Terfi mekanizmasinin tamami bu tek satir.
 images:
   - name: harbor.itacm.site/itacm/itacm
-    newTag: ed02da00f090e140bae7a836817fd8edede29ebc
+    newTag: 856d4f91764eee58e92b7dfe66d029972e9cbfac
 
 patches:
   # Base'de birakilan itacm/ENV yer tutucusunu dolduruyor.
